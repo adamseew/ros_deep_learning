@@ -14,6 +14,7 @@ ROS Melodic (for JetPack 4.2 and Ubuntu 18.04) is recommended, but ROS Kinetic (
 * [Testing](#testing)
 	* [imageNet Node](#imagenet-node)
 	* [detectNet Node](#detectnet-node)
+* [Agricultural Use-Case](#agricultural-use-case)
 
 ## Installation
 
@@ -132,5 +133,16 @@ To inspect the [`vision_msgs/Detection2DArray`](http://docs.ros.org/melodic/api/
 ```bash
 $ rostopic echo /detectnet/detections
 ```
+
+## Agricultural Use-Case
+
+After following the above instructions, to run the Agricultural Use-Case it is necessary to install all the three nodes the use-case is composed of:
+
+* The camera node which samples the camera at specific time intervals. The node has been originally written by Takashi Ogura: [Camera node](https://github.com/adamseew/cv_camera),
+* The object detection node which detects different object while the drone is flying (i.e., the **detectnode** of the current repo). The node has been originally written by Dustin Franklin, and
+* The ground station node which sets the communication between the drone and the ground station: [Ground station node](https://github.com/adamseew/ros_ground_station).
+
+You also need to install **PowProfiler** profiling tool as a library (see the instructions [here](https://github.com/adamseew/powprofiler)).
+ 
 
 
