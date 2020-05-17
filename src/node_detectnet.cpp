@@ -20,73 +20,135 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-#include <ros/ros.h>
+/*
+ * This node is originally cloned from Dustin Franklin 
+ * https://github.com/dusty-nv/ros_deep_learning and modified to work with 
+ * the agricultural use-case.
+ *
+ * The node recquires cv_camera node written by Takashi Ogura running
+ * https://github.com/adamseew/cv_camera.
+ *
+ * The node save a layer 1 model for a fixed rate, it does not account for
+ * dynamic changes in the rate of the cv_camera node.
+ */
 
-#include <sensor_msgs/Image.h>
-#include <vision_msgs/Detection2DArray.h>
-#include <vision_msgs/VisionInfo.h>
-
-#include <jetson-inference/detectNet.h>
 #include <jetson-utils/cudaMappedMemory.h>
+#include <vision_msgs/Detection2DArray.h>
+#include <jetson-inference/detectNet.h>
+#include <vision_msgs/VisionInfo.h>
+#include <sensor_msgs/Image.h>
+#include <powprof/async.h>
+#include <unordered_map>
+#include <ros/ros.h>
+#include <signal.h>
 
 #include "image_converter.h"
 
-#include <unordered_map>
-
-
 // globals
-detectNet* 	 net = NULL;
-imageConverter* cvt = NULL;
+detectNet*		net = NULL;
+imageConverter*	cvt = NULL;
 
-ros::Publisher* detection_pub = NULL;
+ros::Publisher*	detection_pub = NULL;
+ros::Time		last_time;
 
 vision_msgs::VisionInfo info_msg;
 
+// global for shutdown
+// signal-safe flag for whether shutdown is requested
+sig_atomic_t volatile g_request_shutdown = 0;
+
+// globals for powprof
+plnr::config*   	_config;
+plnr::sampler*		_sampler;
+plnr::profiler*		_profiler;
+plnr::pathn*		_model;
+plnr::model_1layer*	_model_1layer;
+
+plnr::component 	_component("detectnet");
+
+// replacement SIGINT handler
+void my_sigint_handler(int sig) {
+
+	g_request_shutdown = 1;
+}
 
 // callback triggered when a new subscriber connected to vision_info topic
-void info_connect( const ros::SingleSubscriberPublisher& pub )
-{
-	ROS_INFO("new subscriber '%s' connected to vision_info topic '%s', sending VisionInfo msg", pub.getSubscriberName().c_str(), pub.getTopic().c_str());
+void info_connect(const ros::SingleSubscriberPublisher& pub) {
+
+	ROS_INFO("new subscriber '%s' connected to vision_info topic '%s', " +
+			 "sending VisionInfo msg", 
+			 pub.getSubscriberName().c_str(),
+			 pub.getTopic().c_str()
+			);
 	pub.publish(info_msg);
 }
 
 
 // input image subscriber callback
-void img_callback( const sensor_msgs::ImageConstPtr& input )
-{
+void img_callback(const sensor_msgs::ImageConstPtr& input) {
+
 	// convert the image to reside on GPU
-	if( !cvt || !cvt->Convert(input) )
-	{
-		ROS_INFO("failed to convert %ux%u %s image", input->width, input->height, input->encoding.c_str());
+	if(!cvt || !cvt->Convert(input)) {
+		ROS_INFO("failed to convert %ux%u %s image", 
+		         input->width, input->height, input->encoding.c_str()
+				);
+
 		return;	
 	}
 
 	// classify the image
 	detectNet::Detection* detections = NULL;
 
-	const int numDetections = net->Detect(cvt->ImageGPU(), cvt->GetWidth(), cvt->GetHeight(), &detections, detectNet::OVERLAY_NONE);
+	const int numDetections = net->Detect(cvt->ImageGPU(), 
+										  cvt->GetWidth(), 
+										  cvt->GetHeight(), 
+										  &detections, 
+										  detectNet::OVERLAY_NONE
+										 );
 
 	// verify success	
-	if( numDetections < 0 )
+	if(numDetections < 0)
 	{
-		ROS_ERROR("failed to run object detection on %ux%u image", input->width, input->height);
+		ROS_ERROR("failed to run object detection on %ux%u image", 
+		          input->width, 
+				  input->height
+				 );
+
 		return;
 	}
 
 	// if objects were detected, send out message
-	if( numDetections > 0 )
+	if(numDetections > 0)
 	{
-		ROS_INFO("detected %i objects in %ux%u image", numDetections, input->width, input->height);
+		ROS_INFO("detected %i objects in %ux%u image", 
+				 numDetections, 
+				 input->width, 
+				 input->height
+				);
 		
-		// create a detection for each bounding box
+	 	// create a detection for each bounding box
 		vision_msgs::Detection2DArray msg;
+		msg.header.stamp = input->header.stamp;
 
 		for( int n=0; n < numDetections; n++ )
 		{
 			detectNet::Detection* det = detections + n;
-
-			printf("object %i class #%u (%s)  confidence=%f\n", n, det->ClassID, net->GetClassDesc(det->ClassID), det->Confidence);
-			printf("object %i bounding box (%f, %f)  (%f, %f)  w=%f  h=%f\n", n, det->Left, det->Top, det->Right, det->Bottom, det->Width(), det->Height()); 
+ 
+			printf("object %i class #%u (%s)  confidence=%f\n", 
+				   n, 
+				   det->ClassID, 
+				   net->GetClassDesc(det->ClassID), 
+				   det->Confidence
+				  );
+			printf("object %i bounding box (%f, %f)  (%f, %f)  w=%f  h=%f\n", 
+				   n, 
+				   det->Left, 
+				   det->Top, 
+				   det->Right, 
+				   det->Bottom, 
+				   det->Width(), 
+				   det->Height()
+				  ); 
 			
 			// create a detection sub-message
 			vision_msgs::Detection2D detMsg;
@@ -100,7 +162,7 @@ void img_callback( const sensor_msgs::ImageConstPtr& input )
 			detMsg.bbox.center.x = cx;
 			detMsg.bbox.center.y = cy;
 
-			detMsg.bbox.center.theta = 0.0f;		// TODO optionally output object image
+			detMsg.bbox.center.theta = 0.0f;
 
 			// create classification hypothesis
 			vision_msgs::ObjectHypothesisWithPose hyp;
@@ -115,32 +177,65 @@ void img_callback( const sensor_msgs::ImageConstPtr& input )
 		// publish the detection message
 		detection_pub->publish(msg);
 	}
+	
+	ros::Time curr_time = ros::Time::now();
+	ros::Duration diff = curr_time - last_time;
+	
+	ROS_INFO("detected frequency of %f Hz", 1.0 / diff.toSec());
+
+	last_time = curr_time;
 }
 
 
 // node main loop
-int main(int argc, char **argv)
-{
-	ros::init(argc, argv, "detectnet");
+int main(int argc, char **argv) {
+
+	// powprof initialization
+	_config = new plnr::config();
+	_sampler = new plnr::sampler_nano();
+
+	// testing if the sampler works
+	if (!_sampler->dryrun()) {
+		
+		ROS_ERROR("powprofiler does not work on this architecture");
+        return 0;
+	}
+
+	_profiler = new plnr::profiler(_config, _sampler);
+
+	ros::init(argc, argv, "detectnet", ros::init_options::NoSigintHandler);
+
+	// override to the SIGINT handler 
+	signal(SIGINT, my_sigint_handler);
  
 	ros::NodeHandle nh;
 	ros::NodeHandle private_nh("~");
+	
+	last_time = ros::Time::now();
 
 	/*
 	 * retrieve parameters
 	 */
-	std::string class_labels_path;
-	std::string prototxt_path;
-	std::string model_path;
-	std::string model_name;
+	std::string	class_labels_path;
+	std::string	prototxt_path;
+	std::string	model_path;
+	std::string	model_name;
 
-	bool use_model_name = false;
+	int         rate;
+	bool 		use_model_name = false;
+
+	private_nh.getParam("/cv_camera/rate", rate);
+	ROS_INFO("rate => %i", rate);
+	
+	size_t config_id = _config->add_configuration(_component, rate);
+	ROS_INFO("config id => %zu", config_id);
 
 	// determine if custom model paths were specified
-	if( !private_nh.getParam("prototxt_path", prototxt_path) ||
-	    !private_nh.getParam("model_path", model_path) )
-	{
-		// without custom model, use one of the built-in pretrained models
+	if (!private_nh.getParam("prototxt_path", prototxt_path) ||
+	    !private_nh.getParam("model_path", model_path)) {
+		
+		// withou
+		// t custom model, use one of the built-in pretrained models
 		private_nh.param<std::string>("model_name", model_name, "ssd-mobilenet-v2");
 		use_model_name = true;
 	}
@@ -156,12 +251,12 @@ int main(int argc, char **argv)
 	/*
 	 * load object detection network
 	 */
-	if( use_model_name )
-	{
+	if (use_model_name) {
+
 		// determine which built-in model was requested
 		detectNet::NetworkType model = detectNet::NetworkTypeFromStr(model_name.c_str());
 
-		if( model == detectNet::CUSTOM )
+		if(model == detectNet::CUSTOM)
 		{
 			ROS_ERROR("invalid built-in pretrained model name '%s', defaulting to pednet", model_name.c_str());
 			model = detectNet::PEDNET;
@@ -169,9 +264,9 @@ int main(int argc, char **argv)
 
 		// create network using the built-in model
 		net = detectNet::Create(model);
-	}
-	else
-	{
+
+	} else {
+
 		// get the class labels path (optional)
 		private_nh.getParam("class_labels_path", class_labels_path);
 
@@ -179,8 +274,8 @@ int main(int argc, char **argv)
 		net = detectNet::Create(prototxt_path.c_str(), model_path.c_str(), mean_pixel, class_labels_path.c_str(), threshold);
 	}
 
-	if( !net )
-	{
+	if (!net) {
+
 		ROS_ERROR("failed to load detectNet model");
 		return 0;
 	}
@@ -200,7 +295,7 @@ int main(int argc, char **argv)
 	std::vector<std::string> class_descriptions;
 	const uint32_t num_classes = net->GetNumClasses();
 
-	for( uint32_t n=0; n < num_classes; n++ )
+	for(uint32_t n=0; n < num_classes; n++)
 		class_descriptions.push_back(net->GetClassDesc(n));
 
 	// create the key on the param server
@@ -213,32 +308,38 @@ int main(int argc, char **argv)
 
 	info_msg.database_location = node_namespace + std::string("/") + class_key;
 	info_msg.database_version  = 0;
-	info_msg.method 		  = net->GetModelPath();
+	info_msg.method 		   = net->GetModelPath();
 	
 	ROS_INFO("class labels => %s", info_msg.database_location.c_str());
-
 
 	/*
 	 * create an image converter object
 	 */
 	cvt = new imageConverter();
 	
-	if( !cvt )
-	{
+	if(!cvt) {
+
 		ROS_ERROR("failed to create imageConverter object");
 		return 0;
 	}
 
-
 	/*
 	 * advertise publisher topics
 	 */
-	ros::Publisher pub = private_nh.advertise<vision_msgs::Detection2DArray>("detections", 25);
+	ros::Publisher pub = private_nh.advertise<vision_msgs::Detection2DArray>
+		(
+		 "detections", 
+		 25
+		);
 	detection_pub = &pub; // we need to publish from the subscriber callback
 
 	// the vision info topic only publishes upon a new connection
-	ros::Publisher info_pub = private_nh.advertise<vision_msgs::VisionInfo>("vision_info", 1, (ros::SubscriberStatusCallback)info_connect);
-
+	ros::Publisher info_pub = private_nh.advertise<vision_msgs::VisionInfo>
+		(
+		 "vision_info", 
+		 1, 
+		 (ros::SubscriberStatusCallback)info_connect
+		);
 
 	/*
 	 * subscribe to image topic
@@ -247,13 +348,32 @@ int main(int argc, char **argv)
 	//image_transport::Subscriber img_sub = it.subscribe("image", 1, img_callback);
 	ros::Subscriber img_sub = private_nh.subscribe("image_in", 5, img_callback);
 	
-
 	/*
 	 * wait for messages
 	 */
 	ROS_INFO("detectnet node initialized, waiting for messages");
 
-	ros::spin();
+	// starting powprof
+	_model_1layer = new plnr::model_1layer(_config, _profiler, _component, config_id);
+	_model_1layer->start();
+	ROS_INFO("powprof started");
+
+	while (!g_request_shutdown) {
+    		ros::spinOnce();
+  	}
+
+	// do the pre-shutdown tasks
+	ROS_WARN("ready for pre-shutdown tasks");
+
+	// stopping powprof
+	_model_1layer->stop();
+	ROS_INFO("powprof stoped");
+
+	plnr::pathn* result = _model_1layer->get_model();
+	ROS_INFO("detected avg power %f", result->avg().get(plnr::vectorn_flags::power));
+	ROS_INFO("model saved in %s", result->save().c_str());
+
+	ros::shutdown();	
 
 	return 0;
 }
