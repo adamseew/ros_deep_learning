@@ -139,7 +139,7 @@ $ rostopic echo /detectnet/detections
 After following the above instructions, to run the Agricultural Use-Case it is necessary to install all the three nodes the use-case is composed of:
 
 * The camera node which samples the camera at specific time intervals. The node has been originally written by Takashi Ogura: [camera Node](https://github.com/adamseew/cv_camera),
-* The object detection node which detects different object while the drone is flying (i.e., the (detectNet Node)[#detectnet-node] of the current repo). The node has been originally written by Dustin Franklin, and
+* The object detection node which detects different object while the drone is flying (i.e., the [detectNet Node](#detectnet-node) of the current repo). The node has been originally written by Dustin Franklin, and
 * The ground station node which sets the communication between the drone and the ground station: [ground station Node](https://github.com/adamseew/ros_ground_station).
 
 You also need to install **PowProfiler** profiling tool as a library (see the instructions [here](https://github.com/adamseew/powprofiler)).
